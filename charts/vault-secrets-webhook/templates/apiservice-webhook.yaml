@@ -40,7 +40,7 @@ items:
       - "*"
       resources:
       - pods
-    failurePolicy: Fail
+    failurePolicy: {{ .Values.podsFailurePolicy }}
     namespaceSelector:
     {{- if .Values.namespaceSelector.matchLabels }}
       matchLabels:
@@ -71,7 +71,7 @@ items:
       - "*"
       resources:
       - secrets
-    failurePolicy: Fail
+    failurePolicy: {{ .Values.secretsFailurePolicy }}
     namespaceSelector:
     {{- if .Values.namespaceSelector.matchLabels }}
       matchLabels:
@@ -103,7 +103,7 @@ items:
           - "*"
         resources:
           - configmaps
-    failurePolicy: Fail
+    failurePolicy: {{ .Values.configmapFailurePolicy }}
     namespaceSelector:
     {{- if .Values.namespaceSelector.matchLabels }}
       matchLabels:
