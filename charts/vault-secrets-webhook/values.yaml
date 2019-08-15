@@ -45,11 +45,11 @@ volumeMounts: []
 # - name: vault-tls
 #   mountPath: /vault/tls
 
+podAnnotations: {}
+
 resources: {}
 
 nodeSelector: {}
-
-namespaceSelector: {}
 
 tolerations: []
 
@@ -68,3 +68,12 @@ configmapFailurePolicy: Ignore
 podsFailurePolicy: Ignore
 
 secretsFailurePolicy: Ignore
+
+namespaceSelector:
+  matchExpressions:
+  - key: name
+    operator: NotIn
+    values:
+    - kube-system
+  # matchLabels:
+  #   vault-injection: enabled

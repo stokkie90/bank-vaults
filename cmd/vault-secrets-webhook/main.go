@@ -24,9 +24,11 @@ import (
 	"github.com/banzaicloud/bank-vaults/cmd/vault-secrets-webhook/registry"
 	"github.com/banzaicloud/bank-vaults/pkg/vault"
 	vaultapi "github.com/hashicorp/vault/api"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 	whhttp "github.com/slok/kubewebhook/pkg/http"
+	"github.com/slok/kubewebhook/pkg/observability/metrics"
 	whcontext "github.com/slok/kubewebhook/pkg/webhook/context"
 	"github.com/slok/kubewebhook/pkg/webhook/mutating"
 	"github.com/spf13/viper"
@@ -36,7 +38,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeVer "k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	kubernetesConfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 type vaultConfig struct {
@@ -714,16 +716,12 @@ func newVaultClient(vaultConfig vaultConfig) (*vault.Client, error) {
 }
 
 func newK8SClient() (*kubernetes.Clientset, error) {
-	kubeConfig, err := rest.InClusterConfig()
+	kubeConfig, err := kubernetesConfig.GetConfig()
 	if err != nil {
 		return nil, err
 	}
 
-	clientset, err := kubernetes.NewForConfig(kubeConfig)
-	if err != nil {
-		return nil, err
-	}
-	return clientset, nil
+	return kubernetes.NewForConfig(kubeConfig)
 }
 
 func (mw *mutatingWebhook) mutatePod(pod *corev1.Pod, vaultConfig vaultConfig, ns string, dryRun bool) error {
@@ -863,6 +861,8 @@ func init() {
 	viper.SetDefault("vault_ignore_missing_secrets", "false")
 	viper.SetDefault("vault_env_passthrough", "")
 	viper.SetDefault("mutate_configmap", "false")
+	viper.SetDefault("tls_cert_file", "")
+	viper.SetDefault("tls_private_key_file", "")
 	viper.SetDefault("listen_address", ":8443")
 	viper.SetDefault("default_image_pull_secret", "")
 	viper.SetDefault("default_image_pull_secret_namespace", "")
@@ -881,8 +881,8 @@ func healthzHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 }
 
-func handlerFor(config mutating.WebhookConfig, mutator mutating.MutatorFunc, logger *log.Logger) http.Handler {
-	webhook, err := mutating.NewWebhook(config, mutator, nil, nil, logger)
+func handlerFor(config mutating.WebhookConfig, mutator mutating.MutatorFunc, recorder metrics.Recorder, logger *log.Logger) http.Handler {
+	webhook, err := mutating.NewWebhook(config, mutator, nil, recorder, logger)
 	if err != nil {
 		logger.Fatalf("error creating webhook: %s", err)
 	}
@@ -907,9 +907,11 @@ func main() {
 
 	mutator := mutating.MutatorFunc(mutatingWebhook.vaultSecretsMutator)
 
-	podHandler := handlerFor(mutating.WebhookConfig{Name: "vault-secrets-pods", Obj: &corev1.Pod{}}, mutator, logger)
-	secretHandler := handlerFor(mutating.WebhookConfig{Name: "vault-secrets-secret", Obj: &corev1.Secret{}}, mutator, logger)
-	configMapHandler := handlerFor(mutating.WebhookConfig{Name: "vault-secrets-configmap", Obj: &corev1.ConfigMap{}}, mutator, logger)
+	metricsRecorder := metrics.NewPrometheus(prometheus.DefaultRegisterer)
+
+	podHandler := handlerFor(mutating.WebhookConfig{Name: "vault-secrets-pods", Obj: &corev1.Pod{}}, mutator, metricsRecorder, logger)
+	secretHandler := handlerFor(mutating.WebhookConfig{Name: "vault-secrets-secret", Obj: &corev1.Secret{}}, mutator, metricsRecorder, logger)
+	configMapHandler := handlerFor(mutating.WebhookConfig{Name: "vault-secrets-configmap", Obj: &corev1.ConfigMap{}}, mutator, metricsRecorder, logger)
 
 	mux := http.NewServeMux()
 	mux.Handle("/pods", podHandler)
@@ -918,8 +920,18 @@ func main() {
 	mux.Handle("/healthz", http.HandlerFunc(healthzHandler))
 	mux.Handle("/metrics", promhttp.Handler())
 
-	logger.Infof("Listening on %s", viper.GetString("listen_address"))
-	err = http.ListenAndServeTLS(viper.GetString("listen_address"), viper.GetString("tls_cert_file"), viper.GetString("tls_private_key_file"), mux)
+	listenAddress := viper.GetString("listen_address")
+	tlsCertFile := viper.GetString("tls_cert_file")
+	tlsPrivateKeyFile := viper.GetString("tls_private_key_file")
+
+	if tlsCertFile == "" && tlsPrivateKeyFile == "" {
+		logger.Infof("Listening on http://%s", listenAddress)
+		err = http.ListenAndServe(listenAddress, mux)
+	} else {
+		logger.Infof("Listening on https://%s", listenAddress)
+		err = http.ListenAndServeTLS(listenAddress, tlsCertFile, tlsPrivateKeyFile, mux)
+	}
+
 	if err != nil {
 		logger.Fatalf("error serving webhook: %s", err)
 	}
